@@ -1,4 +1,49 @@
 ---
+# --- Preserve the cluster CA across rebuilds (opsbox = stable root of trust) ---
+- name: Ensure the opsbox PKI store exists (0700)
+  ansible.builtin.file:
+    path: "{{ pki_store }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Is there a saved CA on the opsbox?
+  ansible.builtin.stat:
+    path: "{{ pki_store }}/ca.key"
+  delegate_to: localhost
+  become: false
+  register: saved_ca
+
+- name: Pre-create the pki dirs on the control plane (when restoring)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/kubernetes/pki
+    - /etc/kubernetes/pki/etcd
+  when: saved_ca.stat.exists
+
+- name: Restore saved CA material BEFORE init (kubeadm then reuses it)
+  ansible.builtin.copy:
+    src: "{{ pki_store }}/{{ item.f }}"
+    dest: "/etc/kubernetes/pki/{{ item.f }}"
+    owner: root
+    group: root
+    mode: "{{ item.m }}"
+  loop:
+    - { f: "ca.crt",             m: "0644" }
+    - { f: "ca.key",             m: "0600" }
+    - { f: "sa.pub",             m: "0644" }
+    - { f: "sa.key",             m: "0600" }
+    - { f: "front-proxy-ca.crt", m: "0644" }
+    - { f: "front-proxy-ca.key", m: "0600" }
+    - { f: "etcd/ca.crt",        m: "0644" }
+    - { f: "etcd/ca.key",        m: "0600" }
+  when: saved_ca.stat.exists
+
 - name: Already initialized?
   ansible.builtin.stat:
     path: /etc/kubernetes/admin.conf
@@ -12,6 +57,21 @@
   args:
     creates: /etc/kubernetes/admin.conf
   when: not admin_conf.stat.exists
+
+- name: Save the cluster CA back to the opsbox (captures first bootstrap; resync after)
+  ansible.builtin.fetch:
+    src: "/etc/kubernetes/pki/{{ item }}"
+    dest: "{{ pki_store }}/{{ item }}"
+    flat: true
+  loop:
+    - ca.crt
+    - ca.key
+    - sa.pub
+    - sa.key
+    - front-proxy-ca.crt
+    - front-proxy-ca.key
+    - etcd/ca.crt
+    - etcd/ca.key
 
 - name: .kube dir for debian user
   ansible.builtin.file:
@@ -30,7 +90,7 @@
     group: debian
     mode: "0600"
 
-- name: Fetch kubeconfig back to the opsbox (post-rebuild CA is new)
+- name: Fetch kubeconfig back to the opsbox (belt-and-suspenders; CA is now stable)
   ansible.builtin.fetch:
     src: /etc/kubernetes/admin.conf
     dest: "{{ playbook_dir }}/../kubeconfig"
