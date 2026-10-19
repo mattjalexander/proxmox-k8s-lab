@@ -4,3 +4,6 @@
 crash.log
 *.tfvars
 !*.tfvars.example
+ansible/inventory.ini
+kubeconfig
+*.retry

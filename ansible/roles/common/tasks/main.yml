@@ -1,0 +1,137 @@
+---
+- name: Disable swap now
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Comment swap out of fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\s+swap\s+.*)$'
+    replace: '# \1'
+
+- name: Load kernel modules at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: "overlay\nbr_netfilter\n"
+    mode: "0644"
+
+- name: Load modules now
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [overlay, br_netfilter]
+
+- name: Sysctl for k8s networking
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-k8s.conf
+    reload: true
+  loop:
+    - { name: net.bridge.bridge-nf-call-iptables,  value: "1" }
+    - { name: net.bridge.bridge-nf-call-ip6tables, value: "1" }
+    - { name: net.ipv4.ip_forward,                 value: "1" }
+
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd
+    state: present
+    update_cache: true
+
+- name: Ensure /etc/containerd exists
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+
+- name: Does containerd config already carry the CRI runc options?
+  ansible.builtin.command: grep -q SystemdCgroup /etc/containerd/config.toml
+  register: ctr_has_opts
+  failed_when: false
+  changed_when: false
+
+# Debian ships a MINIMAL /etc/containerd/config.toml (no CRI runc options), so guarding
+# on "file exists" leaves SystemdCgroup unset and the edits below silently no-match →
+# cgroupfs vs the kubelet's systemd driver → every control-plane pod CrashLoopBackOff.
+# Guard on the KEY, not the file: regenerate whenever the options are absent.
+- name: Render canonical containerd default config when options are missing
+  ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+  when: ctr_has_opts.rc != 0
+  notify: restart containerd
+
+- name: containerd uses systemd cgroup driver
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  notify: restart containerd
+
+- name: Align sandbox (pause) image
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'sandbox_image = .*'
+    replace: 'sandbox_image = "{{ pause_image }}"'
+  notify: restart containerd
+
+- name: Point CNI bin_dir at ecosystem-standard path (the Debian scar)
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'bin_dir = "/usr/lib/cni"'
+    replace: 'bin_dir = "{{ cni_bin_dir }}"'
+  notify: restart containerd
+
+- name: Fail loudly if SystemdCgroup didn't get set (silent no-match ships a broken node)
+  ansible.builtin.command: grep -q 'SystemdCgroup = true' /etc/containerd/config.toml
+  changed_when: false
+
+- name: Enable + start containerd
+  ansible.builtin.systemd:
+    name: containerd
+    enabled: true
+    state: started
+
+- name: k8s apt prerequisites
+  ansible.builtin.apt:
+    name: [apt-transport-https, ca-certificates, curl, gpg]
+    state: present
+    update_cache: true
+
+- name: keyrings dir
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Fetch kubernetes apt key
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/{{ k8s_apt_channel }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: "0644"
+
+- name: Dearmor key
+  ansible.builtin.command:
+    cmd: gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Add kubernetes apt repo
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ k8s_apt_channel }}/deb/ /"
+    filename: kubernetes
+    state: present
+
+- name: Install kubelet/kubeadm/kubectl
+  ansible.builtin.apt:
+    name: [kubelet, kubeadm, kubectl]
+    state: present
+    update_cache: true
+
+- name: Hold kube packages (upgrades are deliberate)
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: [kubelet, kubeadm, kubectl]
+
+- name: Enable kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true

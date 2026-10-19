@@ -1,0 +1,11 @@
+---
+- name: Already joined?
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: Join the cluster
+  ansible.builtin.command: "{{ hostvars[groups['control_plane'][0]].join_command.stdout }}"
+  args:
+    creates: /etc/kubernetes/kubelet.conf
+  when: not kubelet_conf.stat.exists

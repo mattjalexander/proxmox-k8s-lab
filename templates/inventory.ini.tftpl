@@ -1,0 +1,17 @@
+[control_plane]
+%{ for name, vm in vms ~}
+%{ if vm.role == "control-plane" ~}
+${name} ansible_host=${vm.ip}
+%{ endif ~}
+%{ endfor ~}
+
+[workers]
+%{ for name, vm in vms ~}
+%{ if vm.role == "worker" ~}
+${name} ansible_host=${vm.ip}
+%{ endif ~}
+%{ endfor ~}
+
+[k8s_cluster:children]
+control_plane
+workers

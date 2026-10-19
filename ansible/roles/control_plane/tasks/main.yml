@@ -1,0 +1,67 @@
+---
+- name: Already initialized?
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: admin_conf
+
+- name: kubeadm init
+  ansible.builtin.command: >
+    kubeadm init
+    --apiserver-advertise-address={{ control_plane_ip }}
+    --control-plane-endpoint={{ control_plane_ip }}
+  args:
+    creates: /etc/kubernetes/admin.conf
+  when: not admin_conf.stat.exists
+
+- name: .kube dir for debian user
+  ansible.builtin.file:
+    path: /home/debian/.kube
+    state: directory
+    owner: debian
+    group: debian
+    mode: "0700"
+
+- name: kubeconfig for debian user
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/debian/.kube/config
+    remote_src: true
+    owner: debian
+    group: debian
+    mode: "0600"
+
+- name: Fetch kubeconfig back to the opsbox (post-rebuild CA is new)
+  ansible.builtin.fetch:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ playbook_dir }}/../kubeconfig"
+    flat: true
+
+- name: Install Helm
+  ansible.builtin.shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm
+
+- name: Cilium helm repo
+  kubernetes.core.helm_repository:
+    name: cilium
+    repo_url: https://helm.cilium.io/
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Install Cilium (idempotent via Helm)
+  kubernetes.core.helm:
+    name: cilium
+    chart_ref: cilium/cilium
+    release_namespace: kube-system
+    chart_version: "{{ cilium_chart_version }}"
+    values:
+      ipam:
+        mode: cluster-pool
+    wait: true
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Generate a fresh join command (tokens expire ~24h)
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: join_command
+  changed_when: false

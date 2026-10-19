@@ -1,0 +1,6 @@
+---
+k8s_apt_channel:      "v1.33"
+pause_image:          "registry.k8s.io/pause:3.10"
+cni_bin_dir:          "/opt/cni/bin"
+control_plane_ip:     "192.168.3.110"
+cilium_chart_version: "1.17.1"   # check github.com/cilium/cilium/releases for current stable
