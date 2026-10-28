@@ -3,5 +3,7 @@ k8s_apt_channel:      "v1.33"
 pause_image:          "registry.k8s.io/pause:3.10"
 cni_bin_dir:          "/opt/cni/bin"
 control_plane_ip:     "192.168.3.110"
-pki_store:            "{{ lookup('env', 'HOME') }}/.k8s-pki"   # opsbox-held cluster CA; survives rebuilds; NOT in git
+pki_store:            "{{ lookup('env', 'HOME') }}/.k8s-pki"   # cluster CA; survives rebuilds; NOT in git
 cilium_chart_version: "1.17.1"   # check github.com/cilium/cilium/releases for current stable
+sops_age_recipient:   "age1n3may8gdf6y0ztlm2yah5g35w6p86c5fec30h4h7y3vaxxe2vets90sucm"
+sops_age_key_file:    "{{ lookup('env', 'SOPS_AGE_KEY_FILE') }}"   # the DECRYPT key; NEVER committed

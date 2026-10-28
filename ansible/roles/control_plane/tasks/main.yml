@@ -9,9 +9,9 @@
   become: false
   run_once: true
 
-- name: Is there a saved CA on the opsbox?
+- name: Is there a saved (encrypted) CA on the custodian?
   ansible.builtin.stat:
-    path: "{{ pki_store }}/ca.key"
+    path: "{{ pki_store }}/ca.key.enc"        # the ciphertext private keys are SOPS/age-encrypted at rest
   delegate_to: localhost
   become: false
   register: saved_ca
@@ -26,7 +26,9 @@
     - /etc/kubernetes/pki/etcd
   when: saved_ca.stat.exists
 
-- name: Restore saved CA material BEFORE init (kubeadm then reuses it)
+# Certs are publically copied plaintext as-is. Private keys are SOPS-encrypted 
+# decrypted on the controller (operator age key), then placed 0600 on cp-1.
+- name: Restore CA certs BEFORE init (plaintext, copied as-is)
   ansible.builtin.copy:
     src: "{{ pki_store }}/{{ item.f }}"
     dest: "/etc/kubernetes/pki/{{ item.f }}"
@@ -35,13 +37,35 @@
     mode: "{{ item.m }}"
   loop:
     - { f: "ca.crt",             m: "0644" }
-    - { f: "ca.key",             m: "0600" }
     - { f: "sa.pub",             m: "0644" }
-    - { f: "sa.key",             m: "0600" }
     - { f: "front-proxy-ca.crt", m: "0644" }
-    - { f: "front-proxy-ca.key", m: "0600" }
     - { f: "etcd/ca.crt",        m: "0644" }
-    - { f: "etcd/ca.key",        m: "0600" }
+  when: saved_ca.stat.exists
+
+- name: Decrypt the CA private keys on the controller (age key is operator-supplied, off-box)
+  ansible.builtin.command:
+    cmd: "sops --decrypt --input-type binary --output-type binary {{ pki_store }}/{{ item }}.enc"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  no_log: true                                 # never echo key material
+  environment:
+    SOPS_AGE_KEY_FILE: "{{ sops_age_key_file }}"
+  register: decrypted_ca
+  loop: [ca.key, sa.key, front-proxy-ca.key, etcd/ca.key]
+  when: saved_ca.stat.exists
+
+- name: Place the decrypted keys on the control plane (0600, root)
+  ansible.builtin.copy:
+    content: "{{ item.stdout }}"
+    dest: "/etc/kubernetes/pki/{{ item.item }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  loop: "{{ decrypted_ca.results | default([]) }}"   # default([]) so first-run (keys skipped) doesn't error
+  loop_control:
+    label: "{{ item.item }}"                   # log the filename, not the key
   when: saved_ca.stat.exists
 
 - name: Already initialized?
@@ -58,20 +82,42 @@
     creates: /etc/kubernetes/admin.conf
   when: not admin_conf.stat.exists
 
-- name: Save the cluster CA back to the opsbox (captures first bootstrap; resync after)
+# Certs resync plaintext every run (cheap, idempotent). Private keys are captured + encrypted
+# ONCE, on the first-ever bootstrap after that the store already holds the ciphertext.
+- name: Save CA certs back to the custodian (plaintext; idempotent)
   ansible.builtin.fetch:
     src: "/etc/kubernetes/pki/{{ item }}"
     dest: "{{ pki_store }}/{{ item }}"
     flat: true
-  loop:
-    - ca.crt
-    - ca.key
-    - sa.pub
-    - sa.key
-    - front-proxy-ca.crt
-    - front-proxy-ca.key
-    - etcd/ca.crt
-    - etcd/ca.key
+  loop: [ca.crt, sa.pub, front-proxy-ca.crt, etcd/ca.crt]
+
+- name: Capture + encrypt the private keys first bootstrap only
+  when: not saved_ca.stat.exists
+  no_log: true
+  block:
+    - name: Read the fresh private keys from the control plane
+      ansible.builtin.slurp:
+        src: "/etc/kubernetes/pki/{{ item }}"
+      register: fresh_keys
+      loop: [ca.key, sa.key, front-proxy-ca.key, etcd/ca.key]
+
+    - name: Ensure the etcd subdir exists in the store
+      ansible.builtin.file:
+        path: "{{ pki_store }}/etcd"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: SOPS-encrypt each key into the store (public recipient; plaintext never hits controller disk)
+      ansible.builtin.shell:
+        cmd: "sops --encrypt --input-type binary --output-type binary --age {{ sops_age_recipient }} /dev/stdin > {{ pki_store }}/{{ item.item }}.enc"
+        stdin: "{{ item.content | b64decode }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ fresh_keys.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
 - name: .kube dir for debian user
   ansible.builtin.file:
