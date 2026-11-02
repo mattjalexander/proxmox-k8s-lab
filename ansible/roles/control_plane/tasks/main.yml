@@ -16,6 +16,32 @@
   become: false
   register: saved_ca
 
+# FAIL LOUD #1: refuse to silently mint a new CA. A missing store on anything but a
+# first-ever bootstrap means something is wrong (wrong pki_store, root run, lost store).
+- name: Refuse to mint a fresh CA unless explicitly allowed
+  ansible.builtin.assert:
+    that:
+      - saved_ca.stat.exists or (allow_fresh_ca | default(false) | bool)
+    fail_msg: >-
+      No saved CA at {{ pki_store }}/ca.key.enc and allow_fresh_ca is false.
+      Refusing to mint a NEW cluster CA (it would invalidate existing kubeconfigs and the
+      first-boot save-back would overwrite the real store). First-ever bootstrap? re-run with
+      -e allow_fresh_ca=true. Otherwise fix pki_store / run as its owner (NOT root).
+    success_msg: >-
+      {{ 'Saved CA found will preserve it.'
+         if saved_ca.stat.exists else 'allow_fresh_ca=true minting a fresh CA on purpose.' }}
+  run_once: true
+
+# Snapshot the store CA fingerprint BEFORE init (and before the save-back can overwrite it),
+# so FAIL LOUD #2 can prove the cluster actually adopted it.
+- name: Snapshot the store CA fingerprint (pre-init)
+  ansible.builtin.command: "openssl x509 -in {{ pki_store }}/ca.crt -noout -fingerprint -sha256"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  register: store_ca_fp
+  when: saved_ca.stat.exists
+
 - name: Pre-create the pki dirs on the control plane (when restoring)
   ansible.builtin.file:
     path: "{{ item }}"
@@ -26,7 +52,7 @@
     - /etc/kubernetes/pki/etcd
   when: saved_ca.stat.exists
 
-# Certs are publically copied plaintext as-is. Private keys are SOPS-encrypted 
+# Certs are public copied plaintext as-is. Private keys are SOPS-encrypted 
 # decrypted on the controller (operator age key), then placed 0600 on cp-1.
 - name: Restore CA certs BEFORE init (plaintext, copied as-is)
   ansible.builtin.copy:
@@ -50,7 +76,8 @@
   changed_when: false
   no_log: true                                 # never echo key material
   environment:
-    SOPS_AGE_KEY_FILE: "{{ sops_age_key_file }}"
+    SOPS_AGE_KEY: "{{ lookup('env', 'SOPS_AGE_KEY') }}"
+
   register: decrypted_ca
   loop: [ca.key, sa.key, front-proxy-ca.key, etcd/ca.key]
   when: saved_ca.stat.exists
@@ -81,6 +108,27 @@
   args:
     creates: /etc/kubernetes/admin.conf
   when: not admin_conf.stat.exists
+
+# FAIL LOUD #2: when we meant to preserve, the CA the cluster ACTUALLY adopted must equal the
+# store CA. This runs BEFORE the save-back, so a silent failure can't overwrite the real store.
+# (NB: compare the CA cert, not the apiserver leaf the leaf is regenerated every init.)
+- name: Read the live cluster CA fingerprint (post-init)
+  ansible.builtin.command: "openssl x509 -in /etc/kubernetes/pki/ca.crt -noout -fingerprint -sha256"
+  changed_when: false
+  register: live_ca_fp
+  when: saved_ca.stat.exists
+
+- name: Fail loudly if the cluster did NOT adopt the preserved CA
+  ansible.builtin.assert:
+    that:
+      - live_ca_fp.stdout == store_ca_fp.stdout
+    fail_msg: >-
+      CA PRESERVATION FAILED. Store CA ({{ store_ca_fp.stdout }}) != cluster CA
+      ({{ live_ca_fp.stdout }}). kubeadm minted a different CA despite a saved store restore
+      skipped, wrong pki_store, or decrypt produced empty keys. Stopping BEFORE the save-back
+      so your real store is not overwritten. Investigate before re-running.
+    success_msg: "CA preserved: cluster CA == store CA ({{ live_ca_fp.stdout }})."
+  when: saved_ca.stat.exists
 
 # Certs resync plaintext every run (cheap, idempotent). Private keys are captured + encrypted
 # ONCE, on the first-ever bootstrap after that the store already holds the ciphertext.

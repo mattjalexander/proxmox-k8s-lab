@@ -3,17 +3,22 @@
 A reproducible, from-code Kubernetes platform on a bare-metal Proxmox homelab.
 Terraform provisions the VMs, Ansible bootstraps a kubeadm cluster with Cilium,
 and a single `terraform destroy && apply` + playbook run rebuilds the whole thing
-from git — unattended, with a stable cluster CA preserved across rebuilds.
+from git unattended, with a stable cluster CA preserved across rebuilds.
 
-**The artifact:** declarative provision → bootstrap → reproducible teardown/rebuild.
+**The artifact:** declarative provision bootstrap reproducible teardown/rebuild.
 Tear the cluster down and bring it back from code, identity intact.
+
+## Usage
+
+eval $(op signin)
+see terraform.sh and ansible/ansible.sh
 
 ## Architecture
 
-- **Hypervisor:** 2× Minisforum MS-A2 on Proxmox VE 9.1 (`alpharius`, `omegon`),
+- **Hypervisor:** 2 Minisforum MS-A2 on Proxmox VE 9.1 (`alpharius`, `omegon`),
   clustered as `alphaomega`.
 - **Network:** the lab runs on its own VLAN 3 (`192.168.3.0/24`), bridge `vmbr2`.
-- **Control node (`opsbox`, .3.10):** a Debian LXC *outside* Terraform's management —
+- **Control node (`opsbox`, .3.10):** a Debian LXC *outside* Terraform's management 
   holds state, runs terraform/ansible/kubectl, and custodies the cluster CA. The box
   that runs `destroy` must not be something `destroy` can remove.
 - **Cluster (Terraform-provisioned Debian 13 VMs):**
