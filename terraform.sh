@@ -6,4 +6,5 @@ TF_VAR_ci_ssh_public_key="$(cat ~/.ssh/id_ed25519.pub)"
 export TF_VAR_ci_ssh_public_key 
 terraform init
 terraform plan
+# terraform destroy
 # terraform apply

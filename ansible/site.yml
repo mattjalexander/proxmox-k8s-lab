@@ -1,4 +1,56 @@
 ---
+- name: Issue SSH host certs (CA from env, process substitution no key file)
+  hosts: k8s_cluster
+  tags: sshcert
+  gather_facts: false
+  vars:
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"
+  tasks:
+    - name: Scratch dir for signing (tmpfs)
+      ansible.builtin.file: { path: /dev/shm/ssh-ca, state: directory, mode: "0700" }
+      delegate_to: localhost
+      become: false
+    - name: Read the node's current host pubkey
+      ansible.builtin.slurp: { src: /etc/ssh/ssh_host_ed25519_key.pub }
+      register: hk
+    - name: Stage the pubkey on the controller
+      ansible.builtin.copy:
+        content: "{{ hk.content | b64decode }}"
+        dest: "/dev/shm/ssh-ca/{{ inventory_hostname }}.pub"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+    - name: Sign a 52w host cert (principals = name + IP you ssh to)
+      ansible.builtin.shell:
+        cmd: >
+          ssh-keygen -s <(printf '%s\n' "$SSH_HOST_CA_KEY")
+          -I {{ inventory_hostname }} -h -n {{ inventory_hostname }},{{ ansible_host }}
+          -V +52w /dev/shm/ssh-ca/{{ inventory_hostname }}.pub
+        executable: /bin/bash
+      environment: { SSH_HOST_CA_KEY: "{{ lookup('env', 'SSH_HOST_CA_KEY') }}" }
+      delegate_to: localhost
+      become: false
+      no_log: true
+      changed_when: true
+    - name: Place the cert on the node
+      ansible.builtin.copy:
+        src: "/dev/shm/ssh-ca/{{ inventory_hostname }}-cert.pub"
+        dest: /etc/ssh/ssh_host_ed25519_key-cert.pub
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart sshd
+    - name: Point sshd at the cert
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub"
+        regexp: "^#?HostCertificate "
+        validate: "sshd -t -f %s"
+      notify: restart sshd
+  handlers:
+    - name: restart sshd
+      ansible.builtin.service: { name: ssh, state: restarted }
+
 - name: Common prep on all nodes
   hosts: k8s_cluster
   roles: [common]
