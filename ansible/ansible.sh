@@ -6,7 +6,10 @@ cd "$(dirname "$0")"
 SOPS_AGE_KEY="$(op read 'op://Homelab/age/private_key')"  # value only in this process tree
 export SOPS_AGE_KEY
 
+ETCD_ENCRYPTION_KEY="$(op read 'op://Homelab/etcd-encryption/key')"
+export ETCD_ENCRYPTION_KEY
+
 SSH_HOST_CA_KEY="$(op read 'op://Homelab/ssh-host-ca/private_key')"
 export SSH_HOST_CA_KEY
 
-exec ansible-playbook site.yml "$@" --check --diff
+exec ansible-playbook site.yml "$@"

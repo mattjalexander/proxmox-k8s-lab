@@ -95,16 +95,67 @@
     label: "{{ item.item }}"                   # log the filename, not the key
   when: saved_ca.stat.exists
 
+- name: Ensure the encryption-config dir exists on cp-1 (before init)
+  ansible.builtin.file:
+    path: /etc/kubernetes/enc
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Render the etcd EncryptionConfiguration (key is operator-supplied, off-box, JIT)
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/enc/encryption-config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      apiVersion: apiserver.config.k8s.io/v1
+      kind: EncryptionConfiguration
+      resources:
+        - resources:
+            - secrets
+          providers:
+            - secretbox:
+                keys:
+                  - name: key1
+                    secret: "{{ lookup('env', 'ETCD_ENCRYPTION_KEY') }}"
+            - identity: {}
+  no_log: true
+
+- name: Render kubeadm init config (encryption-provider wired in)
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/kubeadm-config.yaml
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: InitConfiguration
+      localAPIEndpoint:
+        advertiseAddress: {{ control_plane_ip }}
+      ---
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: ClusterConfiguration
+      controlPlaneEndpoint: "{{ control_plane_ip }}"
+      apiServer:
+        extraArgs:
+          - name: encryption-provider-config
+            value: /etc/kubernetes/enc/encryption-config.yaml
+        extraVolumes:
+          - name: enc
+            hostPath: /etc/kubernetes/enc
+            mountPath: /etc/kubernetes/enc
+            readOnly: true
+            pathType: DirectoryOrCreate
+
 - name: Already initialized?
   ansible.builtin.stat:
     path: /etc/kubernetes/admin.conf
   register: admin_conf
 
-- name: kubeadm init
-  ansible.builtin.command: >
-    kubeadm init
-    --apiserver-advertise-address={{ control_plane_ip }}
-    --control-plane-endpoint={{ control_plane_ip }}
+- name: kubeadm init (with encryption-provider-config)
+  ansible.builtin.command: kubeadm init --config /etc/kubernetes/kubeadm-config.yaml
   args:
     creates: /etc/kubernetes/admin.conf
   when: not admin_conf.stat.exists

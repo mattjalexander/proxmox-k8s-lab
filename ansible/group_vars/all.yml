@@ -1,9 +1,9 @@
 ---
-k8s_apt_channel:      "v1.33"
+k8s_apt_channel:      "v1.37"
 pause_image:          "registry.k8s.io/pause:3.10"
 cni_bin_dir:          "/opt/cni/bin"
 control_plane_ip:     "192.168.3.110"
 pki_store:            "{{ lookup('env', 'HOME') }}/.k8s-pki"   # cluster CA; survives rebuilds; NOT in git
-cilium_chart_version: "1.17.1"   # check github.com/cilium/cilium/releases for current stable
+cilium_chart_version: "1.20.4"
 sops_age_recipient:   "age1n3may8gdf6y0ztlm2yah5g35w6p86c5fec30h4h7y3vaxxe2vets90sucm"
 allow_fresh_ca:       false                                        # safety: minting a NEW cluster CA requires -e allow_fresh_ca=true (first bootstrap only)
